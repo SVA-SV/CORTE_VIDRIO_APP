@@ -30,7 +30,7 @@ function addRow(data={}){
 
 function resetRows(){
   tbody.innerHTML="";
-  for(let i=0;i<8;i++) addRow();
+  addRow();
 }
 
 function convertVisible(oldU,newU){
