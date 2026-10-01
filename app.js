@@ -13,6 +13,79 @@ function setStatus(msg,ok=true){
   const s=$("status"); s.textContent=msg; s.className="status "+(ok?"ok":"err");
 }
 
+// Datos del pedido: reutilizar campo existente para cliente sin alterar index.html.
+const jobInput=$('job');
+const oldLabel=jobInput?.parentElement?.querySelector('label');
+if(oldLabel)oldLabel.textContent='Nombre del cliente';
+if(jobInput){
+  jobInput.placeholder='Ej. Juan Pérez';
+  if(jobInput.value==='Corte de vidrio')jobInput.value='';
+}
+const colorWrap=document.createElement('div');
+colorWrap.className='glass-color-field';
+colorWrap.innerHTML=`<label for="glassColor">Color de vidrio</label><input id="glassColor" type="text" list="glassColorList" placeholder="Ej. Transparente" autocomplete="off" maxlength="80"><datalist id="glassColorList"><option value="Transparente"><option value="Bronce"><option value="Gris"><option value="Verde"><option value="Azul"><option value="Reflectivo"><option value="Esmerilado"><option value="Opalizado"></datalist>`;
+jobInput.parentElement.parentElement.appendChild(colorWrap);
+const clientName=()=>jobInput.value.trim()||'Sin cliente';
+const glassColor=()=>$('glassColor').value.trim()||'Sin especificar';
+const glassDetails=()=>`Cliente: ${clientName()} · Vidrio: ${glassColor()}`;
+const safeGlassDetails=()=>esc(glassDetails());
+
+// Historial privado del navegador. No se sube a GitHub ni se comparte entre dispositivos.
+const SUGGESTIONS_KEY='vidrieriaAlexCorteSuggestionsV1';
+const DEFAULT_GLASS=['Transparente','Bronce','Gris','Verde','Azul','Reflectivo','Esmerilado','Opalizado'];
+const normalizeSuggestion=value=>String(value||'').trim().replace(/\s+/g,' ');
+let savedSuggestions={clients:[],glass:[]};
+try{
+  const old=JSON.parse(localStorage.getItem(SUGGESTIONS_KEY)||'{}');
+  for(const key of ['clients','glass']){
+    if(Array.isArray(old[key])){
+      savedSuggestions[key]=old[key].filter(v=>typeof v==='string').map(normalizeSuggestion).filter(Boolean).slice(-100);
+    }
+  }
+}catch(err){ /* Datos antiguos dañados: se empieza con un historial vacío. */ }
+const clientChoices=document.createElement('datalist');
+clientChoices.id='clientSuggestions';
+jobInput.setAttribute('list',clientChoices.id);
+jobInput.setAttribute('autocomplete','off');
+jobInput.parentElement.appendChild(clientChoices);
+const drawSuggestions=(element,values)=>{
+  element.replaceChildren();
+  const unique=new Set();
+  for(const value of values){
+    const cleaned=normalizeSuggestion(value);
+    if(!cleaned||unique.has(cleaned.toLocaleLowerCase('es')))continue;
+    unique.add(cleaned.toLocaleLowerCase('es'));
+    const opt=document.createElement('option');
+    opt.value=cleaned;
+    element.appendChild(opt);
+  }
+};
+function refreshSuggestions(){
+  drawSuggestions(clientChoices,savedSuggestions.clients);
+  drawSuggestions($('glassColorList'),[...DEFAULT_GLASS,...savedSuggestions.glass]);
+}
+function rememberSuggestion(kind,value){
+  const clean=normalizeSuggestion(value);
+  if(!clean || clean==='Corte de vidrio')return;
+  const previous=savedSuggestions[kind];
+  const index=previous.findIndex(x=>x.toLocaleLowerCase('es')===clean.toLocaleLowerCase('es'));
+  if(index>=0)previous.splice(index,1);
+  previous.push(clean);
+  if(previous.length>100)previous.splice(0,previous.length-100);
+  try{localStorage.setItem(SUGGESTIONS_KEY,JSON.stringify(savedSuggestions));}
+  catch(err){setStatus('No se pudieron guardar las sugerencias en este navegador.',false);}
+  refreshSuggestions();
+}
+function rememberCurrentSuggestions(){
+  rememberSuggestion('clients',jobInput.value);
+  rememberSuggestion('glass',$('glassColor').value);
+}
+jobInput.addEventListener('change',()=>rememberSuggestion('clients',jobInput.value));
+jobInput.addEventListener('blur',()=>rememberSuggestion('clients',jobInput.value));
+$('glassColor').addEventListener('change',()=>rememberSuggestion('glass',$('glassColor').value));
+$('glassColor').addEventListener('blur',()=>rememberSuggestion('glass',$('glassColor').value));
+refreshSuggestions();
+
 // Captura adaptada a computadora y telefono; identificadores V1, V2, ...
 const isMobile=()=>window.matchMedia("(max-width: 800px)").matches;
 function renumberRows(){
@@ -115,7 +188,7 @@ printCss.textContent=`
   .results{padding:0!important;margin:0!important;border:none!important;box-shadow:none!important}
   #sheets{display:block!important}
   .sheet{height:auto!important;padding:0!important;margin:0!important;border:0!important;break-after:auto!important;page-break-after:auto!important}
-  .sheet-head{margin-bottom:3mm!important;min-height:12mm!important}
+  .sheet-head{margin-bottom:3mm!important;min-height:12mm!important;overflow-wrap:anywhere!important}
   .canvas-wrap{padding:0!important;margin:0!important;border:0!important;height:143mm!important;overflow:hidden!important;display:flex!important;align-items:center!important;justify-content:center!important}
   .canvas-wrap svg{display:block!important;width:auto!important;max-width:100%!important;max-height:143mm!important;height:auto!important}
   .sheet>.note{margin-top:2mm!important;font-size:9pt!important;line-height:1.2!important;break-inside:avoid!important}
@@ -184,56 +257,140 @@ function pruneFree(free){
     if(removed)continue;
   }
 }
-// Corte guillotina: cada pieza sale de un rectangulo libre mediante cortes rectos.
-// Un remanente entre 0 y 2 cm no puede desprenderse: descartamos esa opcion.
+// V5: empaquetado global multi-lamina con cortes guillotina, 90 grados y minimo 2 cm.
+// Cada bloque libre es un rectangulo real, separado por un corte guillotina ejecutable.
+// Se evalúan varias secuencias y distribuciones antes de utilizar otra lamina.
 const MIN_TRIM_CM=2;
-const validRemnant=d=>Math.abs(d)<1e-7 || d>=MIN_TRIM_CM-1e-7;
-function placeInBin(pieces,W,H,strategy){
-  const free=[{x:0,y:0,w:W,h:H}],placed=[],remaining=[];
-  for(const p of pieces){
-    let best=null;
-    for(let i=0;i<free.length;i++){
-      const fr=free[i];
-      for(const rot of [false,true]){
-        const pw=rot?p.packH:p.packW, ph=rot?p.packW:p.packH;
-        if(pw>fr.w+1e-7||ph>fr.h+1e-7)continue;
-        const dx=fr.w-pw,dy=fr.h-ph;
-        if(!validRemnant(dx)||!validRemnant(dy))continue;
-        for(const direction of ['vertical','horizontal']){
-          const score=strategy==='area'?[fr.w*fr.h-pw*ph,Math.min(dx,dy),fr.y]:
-            strategy==='bottom'?[fr.y+ph,fr.x,Math.min(dx,dy)]:
-            [Math.min(dx,dy),Math.max(dx,dy),fr.w*fr.h-pw*ph];
-          if(!best||lexLess(score,best.score))best={i,fr,rot,pw,ph,dx,dy,direction,score};
-        }
+const EPS=1e-6;
+const validRemnant=d=>Math.abs(d)<EPS || d>=MIN_TRIM_CM-EPS;
+function newBin(W,H){return {placed:[],free:[{x:0,y:0,w:W,h:H}]};}
+function seededRandom(seed){
+  let state=seed|0;
+  return ()=>{state^=state<<13;state^=state>>>17;state^=state<<5;return (state>>>0)/4294967296};
+}
+function placementOptions(bin,p,mode,seedRandom){
+  const options=[];
+  for(let fi=0;fi<bin.free.length;fi++){
+    const fr=bin.free[fi];
+    for(const rot of [false,true]){
+      const pw=rot?p.packH:p.packW,ph=rot?p.packW:p.packH;
+      if(pw>fr.w+EPS||ph>fr.h+EPS)continue;
+      const dx=fr.w-pw,dy=fr.h-ph;
+      if(!validRemnant(dx)||!validRemnant(dy))continue;
+      for(const direction of ['vertical','horizontal']){
+        // Ponderar pequeños huecos, ocupación y los remanentes reutilizables.
+        const residual=fr.w*fr.h-pw*ph;
+        const short=Math.min(dx,dy),long=Math.max(dx,dy);
+        let score;
+        if(mode===0)score=short*100+long;
+        else if(mode===1)score=residual;
+        else if(mode===2)score=fr.y+ph+fr.x*.1;
+        else if(mode===3)score=long*100+short;
+        else score=residual*.5+short*50;
+        // Dirección cambia forma de las dos regiones que quedan.
+        if(direction==='vertical'&&dy>EPS&&dx>EPS)score+=mode%2===0?dy*.18:dx*.18;
+        if(direction==='horizontal'&&dy>EPS&&dx>EPS)score+=mode%2===0?dx*.18:dy*.18;
+        score+=seedRandom()*(mode===4?600:0.001);
+        options.push({fi,fr,rot,pw,ph,dx,dy,direction,score});
       }
     }
-    if(!best){remaining.push(p);continue}
-    const b=best,fr=b.fr;
-    free.splice(b.i,1);
-    const add=(x,y,w,h)=>{if(w>1e-7&&h>1e-7)free.push({x,y,w,h})};
-    // Dos cortes completos sin estrechos de menos de 2 cm.
-    if(b.direction==='vertical'){
-      add(fr.x+b.pw,fr.y,b.dx,fr.h);
-      add(fr.x,fr.y+b.ph,b.pw,b.dy);
-    }else{
-      add(fr.x,fr.y+b.ph,fr.w,b.dy);
-      add(fr.x+b.pw,fr.y,b.dx,b.ph);
-    }
-    placed.push({...p,x:fr.x,y:fr.y,usedW:b.pw,usedH:b.ph,rot:b.rot});
   }
-  return {placed,remaining,free};
+  return options;
 }
-function packAll(src,W,H,sortMode,strategy){
-  let pieces=[...src];
-  if(sortMode==="maxside")pieces.sort((a,b)=>Math.max(b.packW,b.packH)-Math.max(a.packW,a.packH)||b.area-a.area);
-  else if(sortMode==="height")pieces.sort((a,b)=>Math.max(b.packW,b.packH)-Math.max(a.packW,a.packH));
-  else pieces.sort((a,b)=>b.area-a.area);
-  const bins=[]; let guard=0;
-  while(pieces.length&&guard++<1000){
-    const r=placeInBin(pieces,W,H,strategy); if(!r.placed.length)return null;
-    bins.push(r); pieces=r.remaining;
+function applyPlacement(bin,p,b){
+  const fr=b.fr;
+  bin.free.splice(b.fi,1);
+  const add=(x,y,w,h)=>{if(w>EPS&&h>EPS)bin.free.push({x,y,w,h})};
+  if(b.direction==='vertical'){
+    add(fr.x+b.pw,fr.y,b.dx,fr.h);
+    add(fr.x,fr.y+b.ph,b.pw,b.dy);
+  }else{
+    add(fr.x,fr.y+b.ph,fr.w,b.dy);
+    add(fr.x+b.pw,fr.y,b.dx,b.ph);
+  }
+  bin.placed.push({...p,x:fr.x,y:fr.y,usedW:b.pw,usedH:b.ph,rot:b.rot});
+}
+function orderedPieces(src,mode,random){
+  const p=src.map(item=>({...item,rnd:random()}));
+  const factor=mode<5?0:mode<9?0.20:0.65;
+  p.sort((a,b)=>{
+    const maxA=Math.max(a.packW,a.packH),maxB=Math.max(b.packW,b.packH);
+    const areaA=a.packW*a.packH,areaB=b.packW*b.packH;
+    const metric=(z,max,area)=>{
+      switch(mode%5){
+        case 0:return area;
+        case 1:return max*max;
+        case 2:return max*max*.7+area*.3;
+        case 3:return Math.min(z.packW,z.packH)*max;
+        default:return area*.6+max*max*.4;
+      }
+    };
+    const baseA=metric(a,maxA,areaA),baseB=metric(b,maxB,areaB);
+    return (baseB*(1-factor+factor*b.rnd))-(baseA*(1-factor+factor*a.rnd)) || a.id.localeCompare(b.id);
+  });
+  return p;
+}
+function packCandidate(src,W,H,sequenceMode,placementMode,seed){
+  const random=seededRandom(seed),list=orderedPieces(src,sequenceMode,random);
+  const bins=[];
+  for(const p of list){
+    let best=null;
+    // Antes de iniciar una lamina nueva, considerar todos los rectangulos
+    // remanentes en TODAS las laminas abiertas, no solo en la ultima.
+    for(let bi=0;bi<bins.length;bi++){
+      const options=placementOptions(bins[bi],p,placementMode,random);
+      for(const option of options){
+        // Preferir huecos ajustados; penalizar abrirse hacia una lamina distinta
+        // solo en caso de empate comparable.
+        const score=option.score+(placementMode===2?bi*.01:0);
+        if(!best||score<best.score)best={binIndex:bi,option,score};
+      }
+    }
+    if(best){applyPlacement(bins[best.binIndex],p,best.option);continue;}
+    const bin=newBin(W,H);
+    const choices=placementOptions(bin,p,placementMode,random);
+    if(!choices.length)return null;
+    choices.sort((a,b)=>a.score-b.score);
+    applyPlacement(bin,p,choices[0]);bins.push(bin);
   }
   return bins;
+}
+function validatePlan(bins,src,W,H){
+  const usedIds=new Set();
+  for(const bin of bins){
+    for(let i=0;i<bin.placed.length;i++){
+      const p=bin.placed[i],key=p.id+'-'+p.copy;
+      if(usedIds.has(key))return false;
+      usedIds.add(key);
+      if(p.x<-EPS||p.y<-EPS||p.x+p.usedW>W+EPS||p.y+p.usedH>H+EPS)return false;
+      for(let j=0;j<i;j++){
+        const a=bin.placed[j];
+        if(p.x<a.x+a.usedW-EPS&&p.x+p.usedW>a.x+EPS&&p.y<a.y+a.usedH-EPS&&p.y+p.usedH>a.y+EPS)return false;
+      }
+    }
+  }
+  return usedIds.size===src.length;
+}
+function optimizeCutPlan(src,W,H){
+  let best=null;
+  const totalArea=src.reduce((s,p)=>s+p.area,0);
+  const lowerBound=Math.ceil((totalArea-EPS)/(W*H));
+  // Número fijo de ensayos, con semilla determinista: mismos datos = mismo plano.
+  // En móviles limitar trabajo para mantener interfaz fluida.
+  const rounds=src.length<=70?160:src.length<=150?95:35;
+  for(let i=0;i<rounds;i++){
+    const mode=i%15, placementMode=Math.floor(i/3)%5;
+    const bins=packCandidate(src,W,H,mode,placementMode,0x1a2b3c4d+i*7919);
+    if(!bins||!validatePlan(bins,src,W,H))continue;
+    // Más importante: menos láminas. Desempate: lamina final más llena.
+    const lastArea=bins[bins.length-1].placed.reduce((s,p)=>s+p.area,0);
+    const score=bins.length*W*H-lastArea;
+    if(!best||bins.length<best.length||(bins.length===best.length&&score<best.score)){
+      best={bins,length:bins.length,score};
+      if(best.length===lowerBound)break;
+    }
+  }
+  return best?best.bins:null;
 }
 
 function calculate(){
@@ -243,14 +400,10 @@ function calculate(){
     if(!pieces.length){setStatus("Ingresa al menos una medida válida.",false);return}
     const tooBig=pieces.filter(p=>!((p.packW<=W&&p.packH<=H)||(p.packH<=W&&p.packW<=H)));
     if(tooBig.length){setStatus("Estas piezas no caben: "+[...new Set(tooBig.map(p=>p.id))].join(", "),false);return}
-    let best=null;
-    for(const s of ["area","maxside","height"])for(const st of ["short","area","bottom"]){
-      const bins=packAll(pieces,W,H,s,st); if(!bins)continue;
-      const waste=bins.length*W*H-pieces.reduce((a,p)=>a+p.area,0),score=[bins.length,waste];
-      if(!best||lexLess(score,best.score))best={bins,score};
-    }
-    render(best.bins,W,H,pieces);
-    setStatus(`Plan con cortes rectos y mínimo de tira desprendible de 2 cm: ${best.bins.length} lámina(s), ${pieces.length} pieza(s). Revisar antes del corte real.`);
+    const bins=optimizeCutPlan(pieces,W,H);
+    if(!bins){setStatus("No se encontró un plan válido. Revisa medidas y margen.",false);return}
+    render(bins,W,H,pieces);
+    setStatus(`Plan V5, buscando reusar sobrantes y mínimo desprendible de 2 cm: ${bins.length} lámina(s), ${pieces.length} pieza(s). Revisar antes del corte real.`);
   }catch(e){setStatus("Error: "+e.message,false)}
 }
 
@@ -260,7 +413,7 @@ function attrs(n,o){Object.entries(o).forEach(([k,v])=>n.setAttribute(k,v))}
 function render(bins,W,H,pieces){
   const total=pieces.reduce((a,p)=>a+p.area,0),util=100*total/(bins.length*W*H),u=unitLabel();
   let waste=bins.length*W*H-total;if($("unit").value==="in")waste/=6.4516;
-  $("summary").innerHTML=`<div class="kpi"><span>Láminas</span><b>${bins.length}</b></div>
+  $("summary").innerHTML=`<div class="kpi"><span>Cliente / vidrio</span><b style="font-size:13px;overflow-wrap:anywhere">${safeGlassDetails()}</b></div><div class="kpi"><span>Láminas</span><b>${bins.length}</b></div>
   <div class="kpi"><span>Piezas</span><b>${pieces.length}</b></div>
   <div class="kpi"><span>Aprovechamiento</span><b>${util.toFixed(1)}%</b></div>
   <div class="kpi"><span>Sobrante total</span><b>${waste.toFixed(2)} ${u}²</b></div>`;
@@ -271,8 +424,8 @@ function render(bins,W,H,pieces){
 function drawSheet(bin,n,W,H){
   const box=document.createElement("section");box.className="sheet";
   const u=unitLabel(),used=bin.placed.reduce((a,p)=>a+p.area,0),util=100*used/(W*H);
-  box.innerHTML=`<div class="sheet-head"><div><div class="sheet-title">${esc($("job").value||"Corte de vidrio")} · Lámina ${n}</div>
-  <div class="note">Lámina ${fmt(fromCm(W))} × ${fmt(fromCm(H))} ${u}</div></div>
+  box.innerHTML=`<div class="sheet-head"><div><div class="sheet-title">Corte de vidrio · Lámina ${n}</div>
+  <div class="note">${safeGlassDetails()}<br>Lámina ${fmt(fromCm(W))} × ${fmt(fromCm(H))} ${u}</div></div>
   <div class="sheet-meta">Piezas: ${bin.placed.length}<br>Aprovechamiento: ${util.toFixed(1)}%</div></div>`;
   const wrap=document.createElement("div");wrap.className="canvas-wrap";
   const NS="http://www.w3.org/2000/svg",vw=1000,vh=Math.round(vw*H/W),sx=vw/W,sy=vh/H;
@@ -288,7 +441,7 @@ function drawSheet(bin,n,W,H){
   wrap.appendChild(svg);box.appendChild(wrap);
   const note=document.createElement("div");note.className="note";note.textContent=`Área gris = sobrante. Margen entre cortes: ${$("gap").value||0} ${u}. Mínimo de tira desprendible: ${fmt(fromCm(MIN_TRIM_CM))} ${u}.`;box.appendChild(note);
   const detail=document.createElement("section"); detail.className="cut-detail";
-  detail.innerHTML=`<h2>${esc($("job").value||"Corte de vidrio")} · Lámina ${n} · Detalle de piezas</h2><p>Medida de lámina: ${fmt(fromCm(W))} × ${fmt(fromCm(H))} ${u} · Mínimo de tira desprendible: ${fmt(fromCm(MIN_TRIM_CM))} ${u}.</p>`;
+  detail.innerHTML=`<h2>Corte de vidrio · Lámina ${n} · Detalle de piezas</h2><p>${safeGlassDetails()}<br>Medida de lámina: ${fmt(fromCm(W))} × ${fmt(fromCm(H))} ${u} · Mínimo de tira desprendible: ${fmt(fromCm(MIN_TRIM_CM))} ${u}.</p>`;
   const table=document.createElement("table");table.innerHTML="<thead><tr><th>Identificación</th><th>Ancho × Alto</th><th>Girada</th><th>Posición X, Y desde esquina superior izquierda</th></tr></thead>";
   const tb=document.createElement("tbody");
   bin.placed.forEach(p=>{
@@ -302,15 +455,16 @@ function drawSheet(bin,n,W,H){
 }
 
 function saveWork(){
-  const data={unit:$("unit").value,sheetW:$("sheetW").value,sheetH:$("sheetH").value,gap:$("gap").value,job:$("job").value,
+  rememberCurrentSuggestions();
+  const data={unit:$("unit").value,sheetW:$("sheetW").value,sheetH:$("sheetH").value,gap:$("gap").value,job:$("job").value,glassColor:$("glassColor").value,
     rows:[...tbody.rows].map(r=>({id:r.querySelector(".rid").value,w:r.querySelector(".rw").value,h:r.querySelector(".rh").value,q:r.querySelector(".rq").value}))};
   localStorage.setItem("vidrieriaAlexCortePWA",JSON.stringify(data)); setStatus("Trabajo guardado en este dispositivo.");
 }
 function loadWork(){
   const raw=localStorage.getItem("vidrieriaAlexCortePWA");if(!raw){setStatus("No hay un trabajo guardado.",false);return}
   try{
-    const d=JSON.parse(raw);previousUnit=d.unit||"cm";$("unit").value=previousUnit;$("sheetW").value=d.sheetW;$("sheetH").value=d.sheetH;$("gap").value=d.gap;$("job").value=d.job||"Corte de vidrio";
-    tbody.innerHTML="";(d.rows||[]).forEach(addRow);if(!tbody.rows.length)resetRows();renumberRows();setStatus("Trabajo cargado.");
+    const d=JSON.parse(raw);previousUnit=d.unit||"cm";$("unit").value=previousUnit;$("sheetW").value=d.sheetW;$("sheetH").value=d.sheetH;$("gap").value=d.gap;$("job").value=(d.job&&d.job!=="Corte de vidrio")?d.job:"";$("glassColor").value=d.glassColor||"";
+    tbody.innerHTML="";(d.rows||[]).forEach(addRow);if(!tbody.rows.length)resetRows();renumberRows();rememberCurrentSuggestions();setStatus("Trabajo cargado.");
   }catch(e){setStatus("No se pudo cargar el trabajo.",false)}
 }
 
@@ -319,7 +473,7 @@ $("btnCalc").addEventListener("click",calculate);
 $("btnPrint").addEventListener("click",()=>{calculate();if($("sheets").children.length)window.print()});
 $("btnSave").addEventListener("click",saveWork);
 $("btnLoad").addEventListener("click",loadWork);
-$("btnClear").addEventListener("click",()=>{resetRows();$("summary").innerHTML="";$("sheets").innerHTML="";setStatus("Formulario limpio.")});
+$("btnClear").addEventListener("click",()=>{resetRows();$("job").value="";$("glassColor").value="";$("summary").innerHTML="";$("sheets").innerHTML="";setStatus("Formulario limpio.")});
 
 window.addEventListener("beforeinstallprompt",e=>{e.preventDefault();deferredPrompt=e;$("btnInstall").style.display="inline-block"});
 $("btnInstall").addEventListener("click",async()=>{if(!deferredPrompt)return;deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null;$("btnInstall").style.display="none"});
