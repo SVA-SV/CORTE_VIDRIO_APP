@@ -101,6 +101,33 @@ mobileCss.textContent=`
 `;
 document.head.appendChild(mobileCss);
 
+// Una lamina = una hoja PDF; listado detallado en la pagina siguiente.
+const printCss=document.createElement("style");
+printCss.textContent=`
+.cut-detail{margin-top:18px;border-top:1px solid #ccd5df;padding-top:10px}
+.cut-detail h2{font-size:18px;margin:4px 0 9px}
+.cut-detail p{font-size:12px}
+.cut-detail table{width:100%;min-width:0;border-collapse:collapse;font-size:12px}
+.cut-detail th,.cut-detail td{padding:5px 9px;border-bottom:1px solid #dce2e9;text-align:left}
+@media print{
+  @page{size:A4 landscape;margin:9mm}
+  html,body,main{margin:0!important;padding:0!important;height:auto!important;overflow:visible!important}
+  .results{padding:0!important;margin:0!important;border:none!important;box-shadow:none!important}
+  #sheets{display:block!important}
+  .sheet{height:auto!important;padding:0!important;margin:0!important;border:0!important;break-after:auto!important;page-break-after:auto!important}
+  .sheet-head{margin-bottom:3mm!important;min-height:12mm!important}
+  .canvas-wrap{padding:0!important;margin:0!important;border:0!important;height:143mm!important;overflow:hidden!important;display:flex!important;align-items:center!important;justify-content:center!important}
+  .canvas-wrap svg{display:block!important;width:auto!important;max-width:100%!important;max-height:143mm!important;height:auto!important}
+  .sheet>.note{margin-top:2mm!important;font-size:9pt!important;line-height:1.2!important;break-inside:avoid!important}
+  .cut-detail{break-before:page!important;page-break-before:always!important;border:0!important;padding:2mm 0!important;margin:0!important;break-after:page!important;page-break-after:always!important}
+  .cut-detail table{font-size:9pt!important;min-width:0!important}
+  .cut-detail tr{break-inside:avoid!important;page-break-inside:avoid!important}
+  .sheet:last-child .cut-detail{break-after:auto!important;page-break-after:auto!important}
+}
+`;
+document.head.appendChild(printCss);
+
+
 function convertVisible(oldU,newU){
   if(oldU===newU)return;
   const f=oldU==="cm"&&newU==="in"?1/2.54:2.54;
@@ -157,25 +184,42 @@ function pruneFree(free){
     if(removed)continue;
   }
 }
+// Corte guillotina: cada pieza sale de un rectangulo libre mediante cortes rectos.
+// Un remanente entre 0 y 2 cm no puede desprenderse: descartamos esa opcion.
+const MIN_TRIM_CM=2;
+const validRemnant=d=>Math.abs(d)<1e-7 || d>=MIN_TRIM_CM-1e-7;
 function placeInBin(pieces,W,H,strategy){
   const free=[{x:0,y:0,w:W,h:H}],placed=[],remaining=[];
   for(const p of pieces){
     let best=null;
-    for(const fr of free){
+    for(let i=0;i<free.length;i++){
+      const fr=free[i];
       for(const rot of [false,true]){
-        const pw=rot?p.packH:p.packW,ph=rot?p.packW:p.packH;
-        if(pw<=fr.w+1e-9&&ph<=fr.h+1e-9){
-          const a=Math.abs(fr.w-pw),b=Math.abs(fr.h-ph),short=Math.min(a,b),long=Math.max(a,b);
-          const score=strategy==="area"?[fr.w*fr.h-pw*ph,short,long]:
-                      strategy==="bottom"?[fr.y+ph,fr.x,short]:
-                      [short,long,fr.w*fr.h-pw*ph];
-          if(!best||lexLess(score,best.score))best={rot,pw,ph,score,x:fr.x,y:fr.y};
+        const pw=rot?p.packH:p.packW, ph=rot?p.packW:p.packH;
+        if(pw>fr.w+1e-7||ph>fr.h+1e-7)continue;
+        const dx=fr.w-pw,dy=fr.h-ph;
+        if(!validRemnant(dx)||!validRemnant(dy))continue;
+        for(const direction of ['vertical','horizontal']){
+          const score=strategy==='area'?[fr.w*fr.h-pw*ph,Math.min(dx,dy),fr.y]:
+            strategy==='bottom'?[fr.y+ph,fr.x,Math.min(dx,dy)]:
+            [Math.min(dx,dy),Math.max(dx,dy),fr.w*fr.h-pw*ph];
+          if(!best||lexLess(score,best.score))best={i,fr,rot,pw,ph,dx,dy,direction,score};
         }
       }
     }
     if(!best){remaining.push(p);continue}
-    const node={...p,x:best.x,y:best.y,rot:best.rot,usedW:best.pw,usedH:best.ph};
-    placed.push(node); splitFree(free,{x:node.x,y:node.y,w:node.usedW,h:node.usedH}); pruneFree(free);
+    const b=best,fr=b.fr;
+    free.splice(b.i,1);
+    const add=(x,y,w,h)=>{if(w>1e-7&&h>1e-7)free.push({x,y,w,h})};
+    // Dos cortes completos sin estrechos de menos de 2 cm.
+    if(b.direction==='vertical'){
+      add(fr.x+b.pw,fr.y,b.dx,fr.h);
+      add(fr.x,fr.y+b.ph,b.pw,b.dy);
+    }else{
+      add(fr.x,fr.y+b.ph,fr.w,b.dy);
+      add(fr.x+b.pw,fr.y,b.dx,b.ph);
+    }
+    placed.push({...p,x:fr.x,y:fr.y,usedW:b.pw,usedH:b.ph,rot:b.rot});
   }
   return {placed,remaining,free};
 }
@@ -206,7 +250,7 @@ function calculate(){
       if(!best||lexLess(score,best.score))best={bins,score};
     }
     render(best.bins,W,H,pieces);
-    setStatus(`Listo: ${best.bins.length} lámina(s), ${pieces.length} pieza(s).`);
+    setStatus(`Plan con cortes rectos y mínimo de tira desprendible de 2 cm: ${best.bins.length} lámina(s), ${pieces.length} pieza(s). Revisar antes del corte real.`);
   }catch(e){setStatus("Error: "+e.message,false)}
 }
 
@@ -242,7 +286,18 @@ function drawSheet(bin,n,W,H){
     const d=document.createElementNS(NS,"text");attrs(d,{x:cx,y:cy+11,"text-anchor":"middle",class:"dimText"});d.textContent=`${fmt(fromCm(sw))} × ${fmt(fromCm(sh))} ${u}${p.rot?" · girado":""}`;svg.appendChild(d);
   }
   wrap.appendChild(svg);box.appendChild(wrap);
-  const note=document.createElement("div");note.className="note";note.textContent=`Área gris = sobrante. Margen entre cortes: ${$("gap").value||0} ${u}.`;box.appendChild(note);
+  const note=document.createElement("div");note.className="note";note.textContent=`Área gris = sobrante. Margen entre cortes: ${$("gap").value||0} ${u}. Mínimo de tira desprendible: ${fmt(fromCm(MIN_TRIM_CM))} ${u}.`;box.appendChild(note);
+  const detail=document.createElement("section"); detail.className="cut-detail";
+  detail.innerHTML=`<h2>${esc($("job").value||"Corte de vidrio")} · Lámina ${n} · Detalle de piezas</h2><p>Medida de lámina: ${fmt(fromCm(W))} × ${fmt(fromCm(H))} ${u} · Mínimo de tira desprendible: ${fmt(fromCm(MIN_TRIM_CM))} ${u}.</p>`;
+  const table=document.createElement("table");table.innerHTML="<thead><tr><th>Identificación</th><th>Ancho × Alto</th><th>Girada</th><th>Posición X, Y desde esquina superior izquierda</th></tr></thead>";
+  const tb=document.createElement("tbody");
+  bin.placed.forEach(p=>{
+    const tr=document.createElement("tr");
+    const vals=[`${p.id}-${p.copy}`,`${fmt(fromCm(p.w))} × ${fmt(fromCm(p.h))} ${u}`,p.rot?"Sí (90°)":"No",`${fmt(fromCm(p.x))}, ${fmt(fromCm(p.y))} ${u}`];
+    vals.forEach(v=>{const td=document.createElement("td");td.textContent=v;tr.appendChild(td)});
+    tb.appendChild(tr);
+  });
+  table.appendChild(tb);detail.appendChild(table);box.appendChild(detail);
   return box;
 }
 
@@ -261,7 +316,7 @@ function loadWork(){
 
 $("btnAdd").addEventListener("click",()=>addAndFocus());
 $("btnCalc").addEventListener("click",calculate);
-$("btnPrint").addEventListener("click",()=>{if(!$("sheets").children.length)calculate();if($("sheets").children.length)window.print()});
+$("btnPrint").addEventListener("click",()=>{calculate();if($("sheets").children.length)window.print()});
 $("btnSave").addEventListener("click",saveWork);
 $("btnLoad").addEventListener("click",loadWork);
 $("btnClear").addEventListener("click",()=>{resetRows();$("summary").innerHTML="";$("sheets").innerHTML="";setStatus("Formulario limpio.")});
