@@ -13,25 +13,93 @@ function setStatus(msg,ok=true){
   const s=$("status"); s.textContent=msg; s.className="status "+(ok?"ok":"err");
 }
 
+// Captura adaptada a computadora y telefono; identificadores V1, V2, ...
+const isMobile=()=>window.matchMedia("(max-width: 800px)").matches;
+function renumberRows(){
+  [...tbody.rows].forEach((r,i)=>{r.querySelector(".rid").value=`V${i+1}`;});
+}
+function focusWidth(tr){
+  const input=tr?.querySelector(".rw");
+  if(input) {input.focus({preventScroll:true}); input.scrollIntoView({block:"nearest",behavior:"smooth"});}
+}
+function rowIsValid(tr){
+  return Number(tr.querySelector(".rw").value)>0 &&
+         Number(tr.querySelector(".rh").value)>0 &&
+         Number.isInteger(Number(tr.querySelector(".rq").value)) &&
+         Number(tr.querySelector(".rq").value)>0;
+}
+function addAndFocus(existingRow){
+  if(existingRow && !rowIsValid(existingRow)){
+    setStatus("Completa ancho, alto y cantidad antes de agregar otra ventana.",false);
+    for(const key of [".rw",".rh",".rq"]){
+      const el=existingRow.querySelector(key);
+      if(!(Number(el.value)>0)){el.focus();break;}
+    }
+    return;
+  }
+  const tr=addRow();focusWidth(tr);
+  setStatus(`Lista la ventana V${tbody.rows.length}.`);
+}
 function addRow(data={}){
   const tr=document.createElement("tr");
-  tr.innerHTML=`<td><input class="rid" type="text"></td>
-  <td><input class="rw" type="number" step="0.01"></td>
-  <td><input class="rh" type="number" step="0.01"></td>
-  <td><input class="rq" type="number" min="1" step="1" value="2"></td>
-  <td><button class="danger del" type="button">×</button></td>`;
-  tr.querySelector(".rid").value=data.id||"";
+  tr.innerHTML=`<td data-label="Ventana"><input class="rid" type="text" readonly aria-label="Identificador automatico"></td>
+  <td data-label="Ancho"><input class="rw" type="number" step="any" min="0" inputmode="decimal" enterkeyhint="next" aria-label="Ancho"></td>
+  <td data-label="Alto"><input class="rh" type="number" step="any" min="0" inputmode="decimal" enterkeyhint="next" aria-label="Alto"></td>
+  <td data-label="Cantidad"><input class="rq" type="number" min="1" step="1" inputmode="numeric" enterkeyhint="done" aria-label="Cantidad" value="2"></td>
+  <td class="actions"><button class="danger del" type="button" aria-label="Eliminar ventana">×</button>
+  <button type="button" class="secondary next-row">+ Guardar y agregar otra ventana</button></td>`;
   tr.querySelector(".rw").value=data.w??"";
   tr.querySelector(".rh").value=data.h??"";
   tr.querySelector(".rq").value=data.q??2;
-  tr.querySelector(".del").addEventListener("click",()=>tr.remove());
-  tbody.appendChild(tr);
+  tr.querySelector(".del").addEventListener("click",()=>{
+    tr.remove();if(!tbody.rows.length)addRow();renumberRows();
+  });
+  tr.querySelector(".next-row").addEventListener("click",()=>addAndFocus(tr));
+  for(const [from,to] of [[".rw",".rh"],[".rh",".rq"]]){
+    tr.querySelector(from).addEventListener("keydown",e=>{
+      if(e.key!=="Enter")return;
+      e.preventDefault();tr.querySelector(to).focus();
+    });
+  }
+  tr.querySelector(".rq").addEventListener("keydown",e=>{
+    if(e.key!=="Enter")return;
+    e.preventDefault();
+    if(isMobile()){
+      tr.querySelector(".rq").blur();
+      setStatus("Pulsa «Guardar y agregar otra ventana» para continuar.");
+    } else addAndFocus(tr);
+  });
+  tbody.appendChild(tr);renumberRows();return tr;
 }
-
 function resetRows(){
   tbody.innerHTML="";
   addRow();
 }
+
+// En dispositivos estrechos se muestra cada ventana como tarjeta vertical.
+const mobileCss=document.createElement("style");
+mobileCss.textContent=`
+.rid{background:#edf3f9!important;color:#15446d;font-weight:800;text-align:center;min-width:55px!important}
+.next-row{display:none}
+@media(max-width:800px){
+ .table-wrap{overflow:visible!important}
+ #tbl{min-width:0!important;display:block}
+ #tbl thead{display:none}
+ #tbl tbody{display:block}
+ #tbl tr{display:grid;grid-template-columns:1fr 1fr;gap:11px;padding:13px;margin:10px 0;border:1px solid #d7e1ed;border-radius:13px;background:#f9fbfd}
+ #tbl td{display:block;border:0!important;padding:0;min-width:0}
+ #tbl td::before{content:attr(data-label);display:block;font-size:12px;color:#475467;font-weight:700;margin-bottom:5px}
+ #tbl td:first-child{grid-column:1 / -1;display:flex;align-items:center;gap:10px}
+ #tbl td:first-child::before{margin:0}
+ #tbl td:first-child .rid{width:85px}
+ #tbl td:nth-child(4){grid-column:1 / -1}
+ #tbl td.actions{grid-column:1 / -1;display:flex;gap:8px;align-items:center}
+ #tbl td.actions .del{min-width:45px}
+ #tbl td.actions .next-row{display:block;flex:1;min-height:46px}
+ #tbl input{min-width:0!important;width:100%;font-size:17px;min-height:45px}
+}
+`;
+document.head.appendChild(mobileCss);
 
 function convertVisible(oldU,newU){
   if(oldU===newU)return;
@@ -54,7 +122,7 @@ $("unit").addEventListener("change",()=>{
 function piecesFromTable(){
   const gap=toCm(parseFloat($("gap").value)||0), out=[];
   [...tbody.rows].forEach((r,idx)=>{
-    const id=r.querySelector(".rid").value.trim()||`P${idx+1}`;
+    const id=r.querySelector(".rid").value.trim()||`V${idx+1}`;
     const w=parseFloat(r.querySelector(".rw").value), h=parseFloat(r.querySelector(".rh").value);
     const q=parseInt(r.querySelector(".rq").value||"0",10);
     if(w>0&&h>0&&q>0){
@@ -187,11 +255,11 @@ function loadWork(){
   const raw=localStorage.getItem("vidrieriaAlexCortePWA");if(!raw){setStatus("No hay un trabajo guardado.",false);return}
   try{
     const d=JSON.parse(raw);previousUnit=d.unit||"cm";$("unit").value=previousUnit;$("sheetW").value=d.sheetW;$("sheetH").value=d.sheetH;$("gap").value=d.gap;$("job").value=d.job||"Corte de vidrio";
-    tbody.innerHTML="";(d.rows||[]).forEach(addRow);if(!tbody.rows.length)resetRows();setStatus("Trabajo cargado.");
+    tbody.innerHTML="";(d.rows||[]).forEach(addRow);if(!tbody.rows.length)resetRows();renumberRows();setStatus("Trabajo cargado.");
   }catch(e){setStatus("No se pudo cargar el trabajo.",false)}
 }
 
-$("btnAdd").addEventListener("click",()=>addRow());
+$("btnAdd").addEventListener("click",()=>addAndFocus());
 $("btnCalc").addEventListener("click",calculate);
 $("btnPrint").addEventListener("click",()=>{if(!$("sheets").children.length)calculate();if($("sheets").children.length)window.print()});
 $("btnSave").addEventListener("click",saveWork);
